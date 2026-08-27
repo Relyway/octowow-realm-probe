@@ -22,6 +22,18 @@ const REALMS = [
   },
 ];
 
+const RETRY_DELAYS_MS = [
+  0,
+  1500,
+  4000,
+];
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function requestPage(
   protocol = "https:",
   hostname = "octowow.st",
@@ -30,17 +42,24 @@ function requestPage(
 ) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) {
-      reject(new Error("Too many redirects"));
+      reject(
+        new Error("Too many redirects")
+      );
       return;
     }
 
     const client =
-      protocol === "https:" ? https : http;
+      protocol === "https:"
+        ? https
+        : http;
 
     const options = {
       protocol,
       hostname,
-      port: protocol === "https:" ? 443 : 80,
+      port:
+        protocol === "https:"
+          ? 443
+          : 80,
       path,
       method: "GET",
 
@@ -66,17 +85,10 @@ function requestPage(
           "no-cache",
       },
 
-      timeout: 15000,
+      timeout: 10000,
     };
 
     if (protocol === "https:") {
-      /*
-        OctoWoW currently has a certificate/name issue
-        for some automated clients.
-
-        Verification is disabled ONLY for this public
-        OctoWoW homepage request.
-      */
       options.rejectUnauthorized = false;
       options.servername = hostname;
     }
@@ -107,7 +119,8 @@ function requestPage(
               requestPage(
                 next.protocol,
                 next.hostname,
-                next.pathname + next.search,
+                next.pathname +
+                  next.search,
                 redirects + 1
               )
             );
@@ -128,9 +141,9 @@ function requestPage(
           resolve({
             status,
             body:
-              Buffer.concat(chunks).toString(
-                "utf8"
-              ),
+              Buffer.concat(
+                chunks
+              ).toString("utf8"),
           });
         });
       }
@@ -161,7 +174,10 @@ function htmlToText(html) {
       " "
     )
     .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(
+      /&nbsp;|&#160;/gi,
+      " "
+    )
     .replace(/&amp;/gi, "&")
     .replace(
       /&#039;|&#39;|&apos;|&rsquo;|&#8217;/gi,
@@ -173,15 +189,10 @@ function htmlToText(html) {
     .trim();
 }
 
-function findRealmStatus(text, realm) {
-  /*
-    Do not rely on an exact string such as:
-    C'Thun (Hardcore)
-
-    OctoWoW may insert question-mark buttons,
-    extra spaces or HTML elements between parts.
-  */
-
+function findRealmStatus(
+  text,
+  realm
+) {
   const nameRegex =
     new RegExp(
       realm.namePattern,
@@ -191,7 +202,9 @@ function findRealmStatus(text, realm) {
   let match;
 
   while (
-    (match = nameRegex.exec(text)) !== null
+    (match =
+      nameRegex.exec(text)) !==
+    null
   ) {
     const nearby =
       text.slice(
@@ -205,7 +218,9 @@ function findRealmStatus(text, realm) {
         "i"
       );
 
-    if (!typeRegex.test(nearby)) {
+    if (
+      !typeRegex.test(nearby)
+    ) {
       continue;
     }
 
@@ -219,7 +234,8 @@ function findRealmStatus(text, realm) {
     }
 
     return statusMatch[1]
-      .toLowerCase() === "online"
+      .toLowerCase() ===
+      "online"
       ? "Online"
       : "Offline";
   }
@@ -246,6 +262,60 @@ function parseRealms(html) {
   return result;
 }
 
+async function readRealmsWithRetries() {
+  const errors = [];
+
+  for (
+    let attempt = 0;
+    attempt <
+    RETRY_DELAYS_MS.length;
+    attempt += 1
+  ) {
+    const delay =
+      RETRY_DELAYS_MS[attempt];
+
+    if (delay > 0) {
+      await sleep(delay);
+    }
+
+    try {
+      const upstream =
+        await requestPage();
+
+      if (
+        upstream.status < 200 ||
+        upstream.status >= 300
+      ) {
+        throw new Error(
+          `OctoWoW HTTP ${upstream.status}`
+        );
+      }
+
+      const realms =
+        parseRealms(
+          upstream.body
+        );
+
+      return {
+        realms,
+        attemptsUsed:
+          attempt + 1,
+      };
+    } catch (error) {
+      errors.push(
+        error instanceof Error
+          ? error.message
+          : String(error)
+      );
+    }
+  }
+
+  throw new Error(
+    "All OctoWoW probe attempts failed: " +
+      errors.join(" | ")
+  );
+}
+
 export default async function handler(
   request,
   response
@@ -260,53 +330,49 @@ export default async function handler(
     "application/json; charset=utf-8"
   );
 
-  if (request.method !== "GET") {
-    return response.status(405).json({
-      ok: false,
-      error: "Method not allowed",
-    });
+  if (
+    request.method !== "GET"
+  ) {
+    return response
+      .status(405)
+      .json({
+        ok: false,
+        error:
+          "Method not allowed",
+      });
   }
 
   try {
-    const upstream =
-      await requestPage();
+    const result =
+      await readRealmsWithRetries();
 
-    if (
-      upstream.status < 200 ||
-      upstream.status >= 300
-    ) {
-      return response.status(502).json({
-        ok: false,
-        error:
-          "OctoWoW upstream error",
-        upstreamStatus:
-          upstream.status,
+    return response
+      .status(200)
+      .json({
+        ok: true,
+
+        source:
+          "OctoWoW Realm Status",
+
+        checkedAt:
+          new Date().toISOString(),
+
+        attemptsUsed:
+          result.attemptsUsed,
+
+        realms:
+          result.realms,
       });
-    }
-
-    const realms =
-      parseRealms(
-        upstream.body
-      );
-
-    return response.status(200).json({
-      ok: true,
-      source:
-        "OctoWoW Realm Status",
-
-      checkedAt:
-        new Date().toISOString(),
-
-      realms,
-    });
   } catch (error) {
-    return response.status(502).json({
-      ok: false,
+    return response
+      .status(502)
+      .json({
+        ok: false,
 
-      error:
-        error instanceof Error
-          ? error.message
-          : String(error),
-    });
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      });
   }
 }
