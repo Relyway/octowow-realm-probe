@@ -4,15 +4,21 @@ import https from "node:https";
 const REALMS = [
   {
     key: "cthun",
-    label: "C'Thun (Hardcore)",
+    name: "C'Thun",
+    type: "Hardcore",
+    namePattern: "C.?Thun",
   },
   {
     key: "nzoth",
-    label: "N'Zoth (Normal)",
+    name: "N'Zoth",
+    type: "Normal",
+    namePattern: "N.?Zoth",
   },
   {
     key: "yshaarj",
-    label: "Y'Shaarj (PvP)",
+    name: "Y'Shaarj",
+    type: "PvP",
+    namePattern: "Y.?Shaarj",
   },
 ];
 
@@ -23,12 +29,13 @@ function requestPage(
   redirects = 0
 ) {
   return new Promise((resolve, reject) => {
-    if (redirects > 4) {
+    if (redirects > 5) {
       reject(new Error("Too many redirects"));
       return;
     }
 
-    const client = protocol === "https:" ? https : http;
+    const client =
+      protocol === "https:" ? https : http;
 
     const options = {
       protocol,
@@ -39,71 +46,101 @@ function requestPage(
 
       headers: {
         "User-Agent":
-          "OrderOfTheLion-OctoWoW-RealmProbe/1.0",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+          "AppleWebKit/537.36 (KHTML, like Gecko) " +
+          "Chrome/151.0.0.0 Safari/537.36",
+
         Accept:
-          "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-        "Accept-Encoding": "identity",
-        "Cache-Control": "no-cache",
-        Pragma: "no-cache",
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+
+        "Accept-Language":
+          "en-US,en;q=0.9",
+
+        "Accept-Encoding":
+          "identity",
+
+        "Cache-Control":
+          "no-cache",
+
+        Pragma:
+          "no-cache",
       },
 
       timeout: 15000,
     };
 
     if (protocol === "https:") {
+      /*
+        OctoWoW currently has a certificate/name issue
+        for some automated clients.
+
+        Verification is disabled ONLY for this public
+        OctoWoW homepage request.
+      */
       options.rejectUnauthorized = false;
+      options.servername = hostname;
     }
 
-    const req = client.request(options, (res) => {
-      const status = res.statusCode || 0;
+    const req = client.request(
+      options,
+      (res) => {
+        const status =
+          res.statusCode || 0;
 
-      if (
-        [301, 302, 303, 307, 308].includes(status) &&
-        res.headers.location
-      ) {
-        res.resume();
+        if (
+          [301, 302, 303, 307, 308].includes(status) &&
+          res.headers.location
+        ) {
+          res.resume();
 
-        try {
-          const currentUrl =
-            protocol + "//" + hostname + path;
+          try {
+            const current =
+              `${protocol}//${hostname}${path}`;
 
-          const nextUrl = new URL(
-            res.headers.location,
-            currentUrl
-          );
+            const next =
+              new URL(
+                res.headers.location,
+                current
+              );
 
-          resolve(
-            requestPage(
-              nextUrl.protocol,
-              nextUrl.hostname,
-              nextUrl.pathname + nextUrl.search,
-              redirects + 1
-            )
-          );
-        } catch (error) {
-          reject(error);
+            resolve(
+              requestPage(
+                next.protocol,
+                next.hostname,
+                next.pathname + next.search,
+                redirects + 1
+              )
+            );
+          } catch (error) {
+            reject(error);
+          }
+
+          return;
         }
 
-        return;
-      }
+        const chunks = [];
 
-      const chunks = [];
-
-      res.on("data", (chunk) => {
-        chunks.push(chunk);
-      });
-
-      res.on("end", () => {
-        resolve({
-          status,
-          body: Buffer.concat(chunks).toString("utf8"),
+        res.on("data", (chunk) => {
+          chunks.push(chunk);
         });
-      });
-    });
+
+        res.on("end", () => {
+          resolve({
+            status,
+            body:
+              Buffer.concat(chunks).toString(
+                "utf8"
+              ),
+          });
+        });
+      }
+    );
 
     req.on("timeout", () => {
       req.destroy(
-        new Error("OctoWoW request timed out")
+        new Error(
+          "OctoWoW request timed out"
+        )
       );
     });
 
@@ -115,65 +152,112 @@ function requestPage(
 
 function htmlToText(html) {
   return html
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(
+      /<script\b[^>]*>[\s\S]*?<\/script>/gi,
+      " "
+    )
+    .replace(
+      /<style\b[^>]*>[\s\S]*?<\/style>/gi,
+      " "
+    )
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
     .replace(
       /&#039;|&#39;|&apos;|&rsquo;|&#8217;/gi,
       "'"
     )
     .replace(/&quot;/gi, '"')
-    .replace(/&amp;/gi, "&")
     .replace(/[’‘]/g, "'")
     .replace(/\s+/g, " ")
     .trim();
 }
 
+function findRealmStatus(text, realm) {
+  /*
+    Do not rely on an exact string such as:
+    C'Thun (Hardcore)
+
+    OctoWoW may insert question-mark buttons,
+    extra spaces or HTML elements between parts.
+  */
+
+  const nameRegex =
+    new RegExp(
+      realm.namePattern,
+      "ig"
+    );
+
+  let match;
+
+  while (
+    (match = nameRegex.exec(text)) !== null
+  ) {
+    const nearby =
+      text.slice(
+        match.index,
+        match.index + 250
+      );
+
+    const typeRegex =
+      new RegExp(
+        `\\b${realm.type}\\b`,
+        "i"
+      );
+
+    if (!typeRegex.test(nearby)) {
+      continue;
+    }
+
+    const statusMatch =
+      nearby.match(
+        /\b(Online|Offline)\b/i
+      );
+
+    if (!statusMatch) {
+      continue;
+    }
+
+    return statusMatch[1]
+      .toLowerCase() === "online"
+      ? "Online"
+      : "Offline";
+  }
+
+  throw new Error(
+    `Could not determine status for ${realm.name} (${realm.type})`
+  );
+}
+
 function parseRealms(html) {
-  const text = htmlToText(html);
+  const text =
+    htmlToText(html);
 
   const result = {};
 
   for (const realm of REALMS) {
-    const position = text
-      .toLowerCase()
-      .indexOf(realm.label.toLowerCase());
-
-    if (position === -1) {
-      throw new Error(
-        `Realm label not found: ${realm.label}`
-      );
-    }
-
-    const nearby = text.slice(
-      position,
-      position + 250
-    );
-
-    const match = nearby.match(
-      /\b(Online|Offline)\b/i
-    );
-
-    if (!match) {
-      throw new Error(
-        `Realm status not found: ${realm.label}`
-      );
-    }
-
     result[realm.key] =
-      match[1].toLowerCase() === "online"
-        ? "Online"
-        : "Offline";
+      findRealmStatus(
+        text,
+        realm
+      );
   }
 
   return result;
 }
 
-export default async function handler(request, response) {
+export default async function handler(
+  request,
+  response
+) {
   response.setHeader(
     "Cache-Control",
     "no-store, no-cache, must-revalidate"
+  );
+
+  response.setHeader(
+    "Content-Type",
+    "application/json; charset=utf-8"
   );
 
   if (request.method !== "GET") {
@@ -184,7 +268,8 @@ export default async function handler(request, response) {
   }
 
   try {
-    const upstream = await requestPage();
+    const upstream =
+      await requestPage();
 
     if (
       upstream.status < 200 ||
@@ -192,22 +277,32 @@ export default async function handler(request, response) {
     ) {
       return response.status(502).json({
         ok: false,
-        error: "OctoWoW upstream error",
-        upstreamStatus: upstream.status,
+        error:
+          "OctoWoW upstream error",
+        upstreamStatus:
+          upstream.status,
       });
     }
 
-    const realms = parseRealms(upstream.body);
+    const realms =
+      parseRealms(
+        upstream.body
+      );
 
     return response.status(200).json({
       ok: true,
-      source: "OctoWoW Realm Status",
-      checkedAt: new Date().toISOString(),
+      source:
+        "OctoWoW Realm Status",
+
+      checkedAt:
+        new Date().toISOString(),
+
       realms,
     });
   } catch (error) {
     return response.status(502).json({
       ok: false,
+
       error:
         error instanceof Error
           ? error.message
