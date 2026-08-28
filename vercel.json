@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/status-v5.js": {
+      "maxDuration": 30
+    },
+    "api/health-v5.js": {
+      "maxDuration": 5
+    }
+  }
+}
